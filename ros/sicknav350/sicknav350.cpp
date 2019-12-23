@@ -23,7 +23,7 @@
 
 const double TRANSFORM_TIMEOUT = 20.0f;
 const double POLLING_DURATION = 0.05f;
-const std::string ODOM_TOPIC = "odom";
+const std::string ODOM_TOPIC = "sick_odom";
 
 namespace OperatingModes
 {
@@ -43,8 +43,8 @@ using namespace SickToolbox;
 
 // TODO: refactor these functions into a common util lib (similar to code in sicklms.cpp)
 void publish_scan(ros::Publisher *pub, double *range_values,
-                  uint32_t n_range_values, int *intensity_values,
-                  uint32_t n_intensity_values, ros::Time start,
+                  uint32_t n_range_values, int *remission_values,
+                  uint32_t n_remission_values, ros::Time start,
                   double scan_time, bool inverted, float angle_min,
                   float angle_max, std::string frame_id,
                   unsigned int sector_start_timestamp,ros::Publisher *pub1)
@@ -70,9 +70,9 @@ void publish_scan(ros::Publisher *pub, double *range_values,
   for (size_t i = 0; i < n_range_values; i++) {
     scan_msg.ranges[i] = (float)range_values[i]/1000;
   }
-  scan_msg.intensities.resize(n_intensity_values);
-  for (size_t i = 0; i < n_intensity_values; i++) {
-    scan_msg.intensities[i] = (float)intensity_values[i];
+  scan_msg.intensities.resize(n_remission_values);
+  for (size_t i = 0; i < n_remission_values; i++) {
+    scan_msg.intensities[i] = (float)remission_values[i];
   }
   pub->publish(scan_msg);
   sicktoolbox_wrapper::navtimestamp st;
@@ -198,6 +198,10 @@ int main(int argc, char *argv[])
 {
   ros::init(argc, argv, "sicknav350");
   int op_mode, port, wait, mask;
+
+  ros::Duration transform_tolerance_;
+  transform_tolerance_.fromSec(0.1);
+
   std::string ipaddress;
   std::string frame_id;
   std::string scan;
@@ -215,9 +219,12 @@ int main(int argc, char *argv[])
                                // display nav localization and ROS localization
                                // simultaneously in RViz.
   std::string mobile_base_frame_id = "";
+   std::string odom_frame_id = "odom";
   std::string reflector_frame_id,reflector_child_frame_id;
   tf::StampedTransform sickn350_to_target_tf;
+   tf::StampedTransform odom_to_mobile_base_tf;    //为robot_pose_ekf确定，为odom到base_link坐标变换
   tf::StampedTransform target_to_mobile_base_tf;  //为模型确定，sick到base_link的坐标变换
+  tf::Transform map_to_odom_tf; 
 
   ros::NodeHandle nh;
   ros::NodeHandle nh_ns("~");
@@ -252,7 +259,7 @@ int main(int argc, char *argv[])
   nh_ns.param("scan_rate", sick_motor_speed, 5);
   /* Define buffers for return values */
   double range_values[SickNav350::SICK_MAX_NUM_MEASUREMENTS] = {0};
-  int intensity_values[SickNav350::SICK_MAX_NUM_MEASUREMENTS] = {0};
+  int remission_values[SickNav350::SICK_MAX_NUM_MEASUREMENTS] = {0};            //intensity_values(可能要去掉unsigned)
   /* Define buffers to hold sector specific data */
   unsigned int num_measurements = {0};
   unsigned int sector_start_timestamp = {0};
@@ -272,19 +279,52 @@ int main(int argc, char *argv[])
     /* Initialize the device */
     sick_nav350.Initialize();
     sick_nav350.GetSickIdentity();
+    sick_nav350.SetOperatingMode((int)OperatingModes::STANDBY);
+    
+    sick_nav350.SetActionRadius(500, 70000);
+    sick_nav350.SetReflectorThreshold(60);
+    sick_nav350.SetReflectorType(2);   //2 means CYLINDRICAL
+    sick_nav350.SetReflectorSize(90);
+    
+    sick_nav350.SetCurrentLayer(0);
     // TODO: do some calls to setup the device - e.g. scan rate. Configure mapping. Configure reflectors/landmarks
-
+    
     if (do_mapping)
     {
+      //int id[9] = {0 ,1 , 2, 3, 4 ,5 ,6 , 7 , 8};
+      //sick_nav350.DeleteLandmark(9,id);
+      sick_nav350.EraseLayout(0);
       sick_nav350.SetOperatingMode((int)OperatingModes::MAPPING);
+      //sick_nav350.SetMappingConfiguration(50, 0,0,0,0);
       sick_nav350.DoMapping();
+      
+      int temp[sick_nav350.ReflectorData_.num_reflector][7];
+
+      for(int i = 0; i < sick_nav350.ReflectorData_.num_reflector; i++)
+      {
+        std::cout << "X : " << sick_nav350.ReflectorData_.x[i] << std::endl;
+        std::cout << "Y : " << sick_nav350.ReflectorData_.y[i] << std::endl;
+        std::cout << "ID : " << sick_nav350.ReflectorData_.GlobalID[i] << std::endl;
+        std::cout << std::endl;
+        temp[i][0] = sick_nav350.ReflectorData_.x[i];
+        temp[i][1] = sick_nav350.ReflectorData_.y[i];
+        temp[i][2] = sick_nav350.ReflectorData_.type[i];
+        temp[i][3] = sick_nav350.ReflectorData_.subtype[i];
+        temp[i][4] = sick_nav350.ReflectorData_.size[i];
+        temp[i][5] = 1;
+        temp[i][6] = 0; //sick_nav350.ReflectorData_.LocalID[i];
+      }
+
+      sick_nav350.AddLandmark(sick_nav350.ReflectorData_.num_reflector, temp);
+      
+      sick_nav350.StoreLayoutPermanent();
       sick_nav350.SetOperatingMode((int)OperatingModes::STANDBY);
       ROS_INFO_STREAM("Sicknav50 Mapping Completed");
     }
     try
     {
       sick_nav350.SetOperatingMode((int)OperatingModes::STANDBY);
-      sick_nav350.SetScanDataFormat();
+      sick_nav350.SetScanDataFormat(1, 0);
       sick_nav350.SetOperatingMode(op_mode);
     }
     catch (...)
@@ -322,7 +362,7 @@ int main(int argc, char *argv[])
           return -1;
         }
 
-        tf_listerner.lookupTransform(sick_frame_id,target_frame_id,current_time,sickn350_to_target_tf);
+        tf_listerner.lookupTransform(target_frame_id,sick_frame_id,current_time,sickn350_to_target_tf); //可能是反的
       }
       catch(tf::LookupException &exp)
       {
@@ -361,7 +401,7 @@ int main(int argc, char *argv[])
           return -1;
         }
 
-        tf_listerner.lookupTransform(target_frame_id,mobile_base_frame_id,current_time,target_to_mobile_base_tf);
+        tf_listerner.lookupTransform(mobile_base_frame_id,target_frame_id,current_time,target_to_mobile_base_tf); //可能是反的
       }
       catch(tf::LookupException &exp)
       {
@@ -390,8 +430,8 @@ int main(int argc, char *argv[])
         return -1;
       }
       ROS_DEBUG_STREAM("Getting sick range/scan measurements");
-      sick_nav350.GetSickMeasurements(range_values,
-                                      intensity_values,
+      sick_nav350.GetSickMeasurementsWithRemission(range_values,
+                                      remission_values,
                                       &num_measurements,
                                       &sector_step_angle,
                                       &sector_start_angle,
@@ -410,17 +450,17 @@ int main(int argc, char *argv[])
       tf::Transform odom_to_sick_tf;
       tf::Transform odom_to_target_tf;
       tf::Quaternion odomquat=tf::createQuaternionFromYaw(DEG2RAD(phi1/1000.0));
-      odomquat.inverse();
+      //odomquat.inverse();
       odom_to_sick_tf.setRotation(odomquat);
-      odom_to_sick_tf.setOrigin(tf::Vector3(-x1 / 1000, -y1/ 1000, 0.0));
+      odom_to_sick_tf.setOrigin(tf::Vector3(x1 / 1000,y1/ 1000, 0));  //x1和y1原先取得负数
 
       // converting to target frame
       odom_to_target_tf = odom_to_sick_tf * sickn350_to_target_tf;
       //实际上发布map到sick的坐标变换，取决于launch文件坐标系的配置
       ROS_DEBUG_STREAM("Sending transform from "<<frame_id<<" to "<<target_frame_id);
-      odom_broadcaster.sendTransform(tf::StampedTransform(odom_to_target_tf, ros::Time::now(),
-                                                                        frame_id, target_frame_id));
-      
+      //odom_broadcaster.sendTransform(tf::StampedTransform(odom_to_target_tf, ros::Time::now(),frame_id, target_frame_id)); 
+      //odom_broadcaster.sendTransform(tf::StampedTransform(odom_to_target_tf, ros::Time::now(),frame_id, mobile_base_frame_id));//实际发布map to base
+
       geometry_msgs::PoseWithCovarianceStamped amcl_pose_msg;
       amcl_pose_msg.header.stamp = ros::Time::now();
       amcl_pose_msg.pose.pose.position.x = x1 / 1000;
@@ -432,11 +472,36 @@ int main(int argc, char *argv[])
       if(publish_odom)
       {
         //mobile_base_current_tf为map到base_link的坐标变换，而robot_pose_ekf发布/odom到/base_link的变换
-        mobile_base_current_tf = odom_to_target_tf*target_to_mobile_base_tf;
+        //mobile_base_current_tf = odom_to_target_tf*target_to_mobile_base_tf.inverse();
+        mobile_base_current_tf = odom_to_target_tf;  //由于sick_nav350建图以自己为中心，所以我们这边不增加sick到move_base的变换
+        //发布map to odom
+        
+        try
+        {
+            std::string error_msg;
+            ros::Time current_time = ros::Time(0);
+            if(!tf_listerner.waitForTransform(
+                odom_frame_id,mobile_base_frame_id,ros::Time(0),ros::Duration(TRANSFORM_TIMEOUT),
+                ros::Duration(POLLING_DURATION),&error_msg))
+            {
+                ROS_ERROR_STREAM("Transform lookup timed out, error msg: "<<error_msg);
+                return -1;
+            }
+
+            tf_listerner.lookupTransform(mobile_base_frame_id,odom_frame_id,current_time,odom_to_mobile_base_tf);
+        }
+        catch(tf::LookupException &exp)
+        {
+            ROS_ERROR_STREAM("Transform lookup between "<<sick_frame_id<<" and "<<target_frame_id<<" failed, exiting");
+            return -1;
+        }
+        map_to_odom_tf = mobile_base_current_tf*odom_to_mobile_base_tf.inverse();
+        odom_broadcaster.sendTransform(tf::StampedTransform(map_to_odom_tf, ros::Time::now() + transform_tolerance_,frame_id, odom_frame_id));
+        
         createOdometryMessage(ros::Time::now() - previous_time,mobile_base_prev_tf,mobile_base_current_tf,odom_msg);
         mobile_base_prev_tf = mobile_base_current_tf;
         previous_time = ros::Time::now();
-        odom_pub.publish(odom_msg);    //这不是odom，而是类似于amcl_pose，odom由base_controller之类的底层驱动发布
+        odom_pub.publish(odom_msg);    //这不是odom，而是类似于amcl_pose，odom由base_controller之类的底层驱动发布,或者robot_pose_ekf发布
       }
 
       
@@ -485,7 +550,7 @@ int main(int argc, char *argv[])
       ros::Time start_scan_time = smoothed_end_scan_time - ros::Duration(scan_duration);
       sector_start_angle-=180;
       sector_stop_angle-=180;
-      publish_scan(&scan_pub, range_values, num_measurements, intensity_values,
+      publish_scan(&scan_pub, range_values, num_measurements, remission_values,
                    num_measurements, start_scan_time, scan_duration, inverted,
                    DEG2RAD((float)sector_start_angle), DEG2RAD((float)sector_stop_angle), scan_frame_id, sector_start_timestamp,&scan_pub1);
 
