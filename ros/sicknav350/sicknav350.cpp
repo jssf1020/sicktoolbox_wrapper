@@ -243,6 +243,7 @@ int main(int argc, char *argv[])
   nh_ns.param<std::string>("frame_id", frame_id, "map");
   nh_ns.param<std::string>("sick_frame_id", sick_frame_id, "sick_nav350");
   nh_ns.param<std::string>("scan_frame_id", scan_frame_id, sick_frame_id);
+  nh_ns.param<std::string>("odom_frame_id", odom_frame_id, "odom");
   nh_ns.param<std::string>("reflector_frame_id", reflector_frame_id, "nav350");
   nh_ns.param<std::string>("reflector_child_frame_id", reflector_child_frame_id, "reflector");
   nh_ns.param<std::string>("target_frame_id",target_frame_id,sick_frame_id);
@@ -463,8 +464,8 @@ int main(int argc, char *argv[])
 
       geometry_msgs::PoseWithCovarianceStamped amcl_pose_msg;
       amcl_pose_msg.header.stamp = ros::Time::now();
-      amcl_pose_msg.pose.pose.position.x = x1 / 1000;
-      amcl_pose_msg.pose.pose.position.y = y1 / 1000;
+      amcl_pose_msg.pose.pose.position.x = -x1 / 1000;    //nav350安装坐标系与我们的不太一样，理论上应该屁股朝前，在这里我们直接取反
+      amcl_pose_msg.pose.pose.position.y = -y1 / 1000;
       amcl_pose_msg.pose.pose.position.z = phi1/1000.0;
 
       amcl_pose_pub.publish(amcl_pose_msg);
